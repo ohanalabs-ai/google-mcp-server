@@ -21,12 +21,14 @@
 #   chmod 700 ./.local/docker-mcp-gcloud/state
 #   cp /absolute/path/to/your/gcp-oauth.keys.json ./.local/docker-mcp-gcloud/gcp-oauth.keys.json
 #   chmod 600 ./.local/docker-mcp-gcloud/gcp-oauth.keys.json
+# - the runtime service keeps the container root filesystem read-only, but the private
+#   state directory itself stays writable so the image can reuse or update credentials.json
+#   if its runtime ever persists refreshed tokens
 #
 # Override paths without editing this file:
 #   GDRIVE_IMAGE=...                                # alternate tag/digest, if you choose to test one
 #   GDRIVE_OAUTH_FILE=/abs/path/to/gcp-oauth.keys.json
 #   GDRIVE_STATE_DIR=/abs/path/to/private/gdrive-state
-#   GDRIVE_AUTH_PORT=3000                          # if you use the web-client workaround, keep this aligned with its redirect URI port
 #
 # Normal MCP stdio runtime (verified transport shape; no HTTP broker here):
 #   docker compose -f docker-compose-gcloud.yaml run --rm -T gdrive
@@ -36,20 +38,29 @@
 # - `compose up` is not sufficient; this image speaks MCP over stdio, not HTTP
 # - the runtime service intentionally exposes no ports
 #
-# Optional one-time auth helper (same image, same credentials path):
-#   docker compose -f docker-compose-gcloud.yaml --profile auth run --rm --service-ports gdrive-auth
-#
-# Important limitation verified from the packaged code and safe synthetic probes:
+# One-time interactive auth is documented here but intentionally not modeled as a Compose
+# service. Safe probes of the packaged image showed:
 # - `mcp/gdrive auth` uses `@google-cloud/local-auth`
 # - when the OAuth JSON is a Desktop App client (`installed`), the callback listener
-#   binds an ephemeral localhost port inside the container; Docker Hub's generic
-#   `-p 3000:3000` example does not make that callback reliably reachable from the host
+#   binds an ephemeral localhost port inside the container, so fixed port publishing is
+#   not a reliable container-to-browser callback strategy
 # - when the OAuth JSON is a `web` client whose first redirect URI is exactly
-#   `http://localhost:3000/oauth2callback`, the auth URL stays on port 3000 and can
-#   align with the localhost-only port publish below
-# - therefore: do not assume containerized interactive auth works with the documented
-#   Desktop App client JSON; if it fails, mint `credentials.json` outside this compose
-#   stack or use a compatible localhost web-client redirect only for this auth workaround
+#   `http://localhost:3000/oauth2callback`, the auth URL stays on port 3000, but that is
+#   a workaround path rather than Docker Hub's documented Desktop App setup
+#
+# External auth workaround (opt-in, real credentials required):
+#   docker run -i --rm \
+#     --mount type=bind,src=/absolute/path/to/gcp-oauth.keys.json,target=/gcp-oauth.keys.json,readonly \
+#     --mount type=bind,src=/absolute/path/to/private/gdrive-state,target=/gdrive-state \
+#     -e GDRIVE_OAUTH_PATH=/gcp-oauth.keys.json \
+#     -e GDRIVE_CREDENTIALS_PATH=/gdrive-state/credentials.json \
+#     -p 127.0.0.1:3000:3000 \
+#     mcp/gdrive@sha256:912536181acc84259baa687ba288704f57585be24494183b8a69b1a1e6be09c2 auth
+#
+# Use that only if your OAuth JSON and browser environment make the callback reachable.
+# Otherwise, obtain `/gdrive-state/credentials.json` outside this stack and then use the
+# Compose runtime service below. This file deliberately does not claim that containerized
+# interactive auth works generically for Desktop App OAuth JSON.
 #
 # Existing authorized-user token files are not guaranteed to be drop-in compatible:
 # - this image reads raw Node/google-auth `auth.credentials` JSON from
@@ -62,9 +73,9 @@
 # Manual smoke tests for this experiment:
 # 1. Missing credentials safety: run `docker compose -f docker-compose-gcloud.yaml run --rm -T gdrive`
 #    before auth; expected error is `Credentials not found. Please run with 'auth' argument first.`
-# 2. Consent flow (opt-in, real credentials required): run the `gdrive-auth` profile above,
-#    open the printed Google URL, complete consent, and confirm `${GDRIVE_STATE_DIR}/credentials.json`
-#    is created without changing the read-only OAuth client JSON mount.
+# 2. Consent flow (opt-in, real credentials required): run the external `docker run ... auth`
+#    command above, open the printed Google URL, and confirm `${GDRIVE_STATE_DIR}/credentials.json`
+#    is created without changing the read-only OAuth client JSON input.
 # 3. Token reuse: rerun the normal `gdrive` command and confirm no new consent flow is required.
 # 4. Capability discovery from an MCP client: initialize over stdio, then list tools/resources;
 #    expect the image's documented Drive-only surface rather than a generic HTTP endpoint.
@@ -82,26 +93,8 @@ services:
     tty: false
     read_only: true
     environment:
-      GDRIVE_CREDENTIALS_PATH: /gdrive-state/credentials.json
-    volumes:
-      - type: bind
-        source: ${GDRIVE_STATE_DIR:-./.local/docker-mcp-gcloud/state}
-        target: /gdrive-state
-        read_only: true
-        bind:
-          create_host_path: false
-
-  gdrive-auth:
-    profiles: [auth]
-    image: ${GDRIVE_IMAGE:-mcp/gdrive@sha256:912536181acc84259baa687ba288704f57585be24494183b8a69b1a1e6be09c2}
-    command: [auth]
-    stdin_open: true
-    tty: false
-    environment:
       GDRIVE_OAUTH_PATH: /gcp-oauth.keys.json
       GDRIVE_CREDENTIALS_PATH: /gdrive-state/credentials.json
-    ports:
-      - 127.0.0.1:${GDRIVE_AUTH_PORT:-3000}:3000
     volumes:
       - type: bind
         source: ${GDRIVE_OAUTH_FILE:-./.local/docker-mcp-gcloud/gcp-oauth.keys.json}
