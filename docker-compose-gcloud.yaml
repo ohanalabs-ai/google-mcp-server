@@ -1,0 +1,109 @@
+# Compose-only compatibility experiment for the published Docker Hub image at
+# https://hub.docker.com/r/mcp/gdrive.
+#
+# Scope of this PR:
+# - add only this standalone compose file
+# - consume the unmodified third-party image; do not build local Python code
+# - keep credential state isolated from the separate Python experiment
+#
+# Image provenance / verification notes:
+# - default image pin: mcp/gdrive@sha256:912536181acc84259baa687ba288704f57585be24494183b8a69b1a1e6be09c2
+#   (Docker Hub `latest` manifest list observed 2026-09-10)
+# - published Linux manifests observed for: amd64, arm64
+# - local safe probes here only verified linux/amd64 behavior
+# - entrypoint inside the image is `node dist/index.js`
+# - the image requests only `https://www.googleapis.com/auth/drive.readonly`
+# - documented MCP capabilities remain Drive-only: `search` plus file resources;
+#   broader Google grants do not add Gmail, Calendar, or Drive-write tools
+#
+# Host preparation (do not commit real secrets):
+#   mkdir -p ./.local/docker-mcp-gcloud/state
+#   chmod 700 ./.local/docker-mcp-gcloud/state
+#   cp /absolute/path/to/your/gcp-oauth.keys.json ./.local/docker-mcp-gcloud/gcp-oauth.keys.json
+#   chmod 600 ./.local/docker-mcp-gcloud/gcp-oauth.keys.json
+# - the runtime service keeps the container root filesystem read-only, but the private
+#   state directory itself stays writable so the image can reuse or update credentials.json
+#   if its runtime ever persists refreshed tokens
+#
+# Override paths without editing this file:
+#   GDRIVE_IMAGE=...                                # alternate tag/digest, if you choose to test one
+#   GDRIVE_OAUTH_FILE=/abs/path/to/gcp-oauth.keys.json
+#   GDRIVE_STATE_DIR=/abs/path/to/private/gdrive-state
+#
+# Normal MCP stdio runtime (verified transport shape; no HTTP broker here):
+#   docker compose -f docker-compose-gcloud.yaml run --rm -T gdrive
+#
+# Notes for MCP clients:
+# - keep `-T` so Compose does not allocate a TTY onto the machine protocol
+# - `compose up` is not sufficient; this image speaks MCP over stdio, not HTTP
+# - the runtime service intentionally exposes no ports
+#
+# One-time interactive auth is documented here but intentionally not modeled as a Compose
+# service. Safe probes of the packaged image showed:
+# - `mcp/gdrive auth` uses `@google-cloud/local-auth`
+# - when the OAuth JSON is a Desktop App client (`installed`), the callback listener
+#   binds an ephemeral localhost port inside the container, so fixed port publishing is
+#   not a reliable container-to-browser callback strategy
+# - when the OAuth JSON is a `web` client whose first redirect URI is exactly
+#   `http://localhost:3000/oauth2callback`, the auth URL stays on port 3000, but that is
+#   a workaround path rather than Docker Hub's documented Desktop App setup
+#
+# External auth workaround (opt-in, real credentials required):
+#   docker run -i --rm \
+#     --mount type=bind,src=/absolute/path/to/gcp-oauth.keys.json,target=/gcp-oauth.keys.json,readonly \
+#     --mount type=bind,src=/absolute/path/to/private/gdrive-state,target=/gdrive-state \
+#     -e GDRIVE_OAUTH_PATH=/gcp-oauth.keys.json \
+#     -e GDRIVE_CREDENTIALS_PATH=/gdrive-state/credentials.json \
+#     -p 127.0.0.1:3000:3000 \
+#     mcp/gdrive@sha256:912536181acc84259baa687ba288704f57585be24494183b8a69b1a1e6be09c2 auth
+#
+# Use that only if your OAuth JSON and browser environment make the callback reachable.
+# Otherwise, obtain `/gdrive-state/credentials.json` outside this stack and then use the
+# Compose runtime service below. This file deliberately does not claim that containerized
+# interactive auth works generically for Desktop App OAuth JSON.
+#
+# Existing authorized-user token files are not guaranteed to be drop-in compatible:
+# - this image reads raw Node/google-auth `auth.credentials` JSON from
+#   `GDRIVE_CREDENTIALS_PATH`
+# - Python token exports commonly use different field names (`token`, `expiry`) than the
+#   Node credentials expected here (`access_token`, `expiry_date` in epoch-millis)
+# - refresh tokens also stay associated with the OAuth client that issued them
+# - any conversion/import automation belongs in a follow-up change, not this one-file experiment
+#
+# Manual smoke tests for this experiment:
+# 1. Missing credentials safety: run `docker compose -f docker-compose-gcloud.yaml run --rm -T gdrive`
+#    before auth; expected error is `Credentials not found. Please run with 'auth' argument first.`
+# 2. Consent flow (opt-in, real credentials required): run the external `docker run ... auth`
+#    command above, open the printed Google URL, and confirm `${GDRIVE_STATE_DIR}/credentials.json`
+#    is created without changing the read-only OAuth client JSON input.
+# 3. Token reuse: rerun the normal `gdrive` command and confirm no new consent flow is required.
+# 4. Capability discovery from an MCP client: initialize over stdio, then list tools/resources;
+#    expect the image's documented Drive-only surface rather than a generic HTTP endpoint.
+# 5. Expiry / refresh: if you have a safely disposable test account, let the access token expire
+#    and retry. This experiment did not validate refresh success with real Google credentials, and
+#    the packaged source creates `new google.auth.OAuth2()` without supplying client ID/secret at
+#    runtime, so external credential management or re-auth may still be required.
+# 6. No destructive tests: avoid writes, deletes, or scope expansion claims beyond what the image implements.
+name: docker-mcp-gcloud-experiment
+
+services:
+  gdrive:
+    image: ${GDRIVE_IMAGE:-mcp/gdrive@sha256:912536181acc84259baa687ba288704f57585be24494183b8a69b1a1e6be09c2}
+    stdin_open: true
+    tty: false
+    read_only: true
+    environment:
+      GDRIVE_OAUTH_PATH: /gcp-oauth.keys.json
+      GDRIVE_CREDENTIALS_PATH: /gdrive-state/credentials.json
+    volumes:
+      - type: bind
+        source: ${GDRIVE_OAUTH_FILE:-./.local/docker-mcp-gcloud/gcp-oauth.keys.json}
+        target: /gcp-oauth.keys.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${GDRIVE_STATE_DIR:-./.local/docker-mcp-gcloud/state}
+        target: /gdrive-state
+        bind:
+          create_host_path: false
