@@ -61,7 +61,7 @@ Create a meeting tomorrow 2-3pm with Spencer, John, and Sarah
 
 ## 🔐 Security & Scopes
 
-This server uses **intentionally restrictive OAuth scopes** for maximum security by default. These scopes are compatible with [Google Advanced Protection Program](https://landing.google.com/advancedprotection/) and follow the principle of least privilege.
+This server uses **intentionally restrictive OAuth scopes** for maximum security by default and follows the principle of least privilege. Treat any Advanced Protection compatibility as something to verify in your own environment rather than a guaranteed property of this prototype.
 
 ### Default Scopes (Security-First)
 - `drive.file` - Only files created by this app (not full Drive access)
@@ -87,11 +87,42 @@ GOOGLE_ADDITIONAL_SCOPES=https://www.googleapis.com/auth/drive https://www.googl
 
 **File**: Scopes are defined in `src/google_mcp_server/auth.py` (`DEFAULT_SCOPES`)
 
+### Local OAuth broker experiment
+
+This branch also adds an **opt-in local HTTP broker runtime** for browser-based credential upload and broker-issued JWT authorization:
+
+- Separate upload paths for **OAuth client JSON** (`installed` or `web`) and **authorized-user token JSON**
+- Explicit per-service scope selection with **disabled**, **selected-file**, **read-only**, and **write** modes where supported
+- Verified **requested / granted / missing** scopes using trusted Google endpoints
+- Short-lived broker JWTs scoped to the local MCP broker audience only
+- Legacy stdio behavior remains the default; the browser broker is opt-in
+
+#### Run the broker locally with Docker Compose
+
+```bash
+cp .env.example .env
+# Fill GOOGLE_MCP_BROKER_BOOTSTRAP_SECRET, GOOGLE_MCP_BROKER_STORAGE_KEY,
+# GOOGLE_MCP_BROKER_JWT_SIGNING_KEY, and GOOGLE_MCP_PUBLIC_BASE_URL
+docker compose up --build
+```
+
+- Broker UI: `http://127.0.0.1:8080/`
+- MCP HTTP endpoint: `http://127.0.0.1:8080/mcp`
+- Health check: `http://127.0.0.1:8080/healthz`
+
+#### OAuth client setup notes
+
+- **Web client JSON** must include the exact callback URL: `http://127.0.0.1:8080/oauth/callback` (or your configured `GOOGLE_MCP_PUBLIC_BASE_URL` equivalent).
+- **Installed client JSON** is kept separate from authorized-user token uploads. For this containerized prototype, the callback URL above must still appear in the uploaded client configuration if you want to complete browser consent through the broker.
+- Uploaded token JSON scope strings are **not** trusted as proof of authorization; the broker verifies actual granted scopes with Google.
+- Service-account private keys are rejected in this prototype.
+
 ## 📚 Documentation
 
 - **[Complete Setup Guide](docs/setup.md)** - Detailed Google Cloud Console configuration
 - **[All Tools Reference](docs/tools.md)** - Complete list of 50+ available tools
 - **[Usage Examples](docs/examples.md)** - Common workflows and advanced usage
+- **[OAuth Broker Experiment](docs/oauth-broker.md)** - Local HTTP broker setup, JWT flow, and prototype limitations
 - **[Troubleshooting](docs/troubleshooting.md)** - Solutions for common issues
 
 ## 🛡️ Safety Features

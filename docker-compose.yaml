@@ -1,0 +1,31 @@
+name: google-mcp-server-python-oauth-broker
+
+services:
+  google-mcp-server:
+    build:
+      context: .
+    image: google-mcp-server:local
+    command: ["google-mcp-server", "--runtime", "broker", "--host", "0.0.0.0", "--port", "8080"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${GOOGLE_MCP_HTTP_PORT:-8080}:8080"
+    environment:
+      GOOGLE_MCP_RUNTIME: broker
+      GOOGLE_MCP_HTTP_HOST: 0.0.0.0
+      GOOGLE_MCP_HTTP_PORT: "8080"
+      GOOGLE_MCP_PUBLIC_BASE_URL: "${GOOGLE_MCP_PUBLIC_BASE_URL:-http://127.0.0.1:8080}"
+      GOOGLE_MCP_BROKER_DATA_DIR: /data
+      GOOGLE_MCP_BROKER_BOOTSTRAP_SECRET: "${GOOGLE_MCP_BROKER_BOOTSTRAP_SECRET:-__MISSING_BOOTSTRAP_SECRET__}"
+      GOOGLE_MCP_BROKER_STORAGE_KEY: "${GOOGLE_MCP_BROKER_STORAGE_KEY:-__MISSING_STORAGE_KEY__}"
+      GOOGLE_MCP_BROKER_JWT_SIGNING_KEY: "${GOOGLE_MCP_BROKER_JWT_SIGNING_KEY:-__MISSING_JWT_SIGNING_KEY__}"
+    volumes:
+      - google-mcp-server-broker-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=5).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  google-mcp-server-broker-data:
