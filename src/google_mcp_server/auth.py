@@ -32,21 +32,37 @@ DEFAULT_SCOPES = [
 class GoogleAuthManager:
     """Manages Google OAuth2 authentication and credential storage."""
     
-    def __init__(self, client_id: str, client_secret: str, 
+    def __init__(self, client_id: str, client_secret: str,
                  redirect_uri: str = "http://localhost:8080",
-                 additional_scopes: Optional[List[str]] = None):
+                 additional_scopes: Optional[List[str]] = None,
+                 open_browser: bool = False,
+                 callback_bind_addr: str = "0.0.0.0"):
         """
         Initialize the Google Auth Manager.
-        
+
         Args:
             client_id: Google OAuth2 client ID
             client_secret: Google OAuth2 client secret
             redirect_uri: OAuth2 redirect URI (must match Google Console config)
             additional_scopes: Additional OAuth2 scopes beyond defaults
+            open_browser: Whether to try opening a local browser for consent.
+                Defaults to False because this server normally runs inside a
+                container with no browser available; attempting to open one
+                there raises webbrowser.Error and previously aborted the whole
+                flow before the authorization URL was ever printed.
+            callback_bind_addr: Interface the local OAuth callback server
+                binds to. Defaults to "0.0.0.0" so a published container port
+                (e.g. `docker run -p 8080:8080`) can reach it - binding only
+                to "localhost" inside a container is unreachable from the
+                host's browser even with the port published, since Docker's
+                port-forwarding lands on the container's real interface, not
+                its loopback.
         """
         self.client_id = client_id
         self.client_secret = client_secret
         self.redirect_uri = redirect_uri
+        self.open_browser = open_browser
+        self.callback_bind_addr = callback_bind_addr
         
         # Combine default and additional scopes
         self.scopes = DEFAULT_SCOPES.copy()
@@ -137,15 +153,38 @@ class GoogleAuthManager:
                 raise RuntimeError(f"Could not find available port starting from {original_port}")
             
             print(f"Starting OAuth2 flow...")
-            print(f"Your browser will open to authenticate with Google.")
-            print(f"If the browser doesn't open automatically, visit the URL that will be displayed.")
-            
+
+            # Only attempt to open a browser if one is actually requested AND
+            # available. webbrowser.get() raises webbrowser.Error when no
+            # runnable browser exists (always true in this Dockerfile's
+            # python:3.12-slim base) - that exception happens *before*
+            # run_local_server ever prints the authorization URL, so letting
+            # it propagate silently swallowed the one thing the user needs to
+            # complete auth manually.
+            open_browser = self.open_browser
+            if open_browser:
+                try:
+                    webbrowser.get()
+                except webbrowser.Error:
+                    logger.info("No runnable browser detected; falling back to printing the authorization URL")
+                    open_browser = False
+
+            if open_browser:
+                print(f"Your browser will open to authenticate with Google.")
+            print(f"Visit the URL below to authenticate with Google:")
+
             # Update redirect URI if port changed
             if port != original_port:
                 flow.redirect_uri = f"http://localhost:{port}"
-            
-            # Run local server and open browser
-            creds = flow.run_local_server(port=port, open_browser=True)
+
+            # Run local server, binding it separately from the advertised
+            # redirect host so a published container port can reach it.
+            creds = flow.run_local_server(
+                host="localhost",
+                bind_addr=self.callback_bind_addr,
+                port=port,
+                open_browser=open_browser,
+            )
             
             if creds:
                 self._save_credentials(creds)
