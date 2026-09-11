@@ -142,6 +142,60 @@ class TestGoogleAuthManager:
                 client_id=self.client_id,
                 client_secret=self.client_secret
             )
-            
+
             result = auth_manager.test_authentication()
             assert result is False
+
+    def test_init_defaults_are_container_safe(self):
+        """open_browser defaults False, callback_bind_addr defaults 0.0.0.0.
+
+        These defaults matter because this server normally runs inside a
+        Docker container with no browser installed and no published port
+        bound to localhost specifically.
+        """
+        auth_manager = GoogleAuthManager(
+            client_id=self.client_id,
+            client_secret=self.client_secret
+        )
+
+        assert auth_manager.open_browser is False
+        assert auth_manager.callback_bind_addr == "0.0.0.0"
+
+    @patch('google_mcp_server.auth.InstalledAppFlow')
+    def test_oauth_flow_falls_back_when_no_browser_available(self, mock_flow_class):
+        """A webbrowser.Error must not abort the flow before printing the URL."""
+        mock_flow = Mock()
+        mock_flow.run_local_server.return_value = Mock()
+        mock_flow_class.from_client_config.return_value = mock_flow
+
+        auth_manager = GoogleAuthManager(
+            client_id=self.client_id,
+            client_secret=self.client_secret,
+            open_browser=True,
+        )
+
+        with patch('google_mcp_server.auth.webbrowser.get', side_effect=__import__('webbrowser').Error("no runnable browser")):
+            creds = auth_manager._run_oauth_flow()
+
+        assert creds is not None
+        _, kwargs = mock_flow.run_local_server.call_args
+        assert kwargs.get("open_browser") is False
+
+    @patch('google_mcp_server.auth.InstalledAppFlow')
+    def test_oauth_flow_passes_bind_addr_separately_from_host(self, mock_flow_class):
+        """The callback server must bind callback_bind_addr, not the advertised host."""
+        mock_flow = Mock()
+        mock_flow.run_local_server.return_value = Mock()
+        mock_flow_class.from_client_config.return_value = mock_flow
+
+        auth_manager = GoogleAuthManager(
+            client_id=self.client_id,
+            client_secret=self.client_secret,
+            callback_bind_addr="0.0.0.0",
+        )
+
+        auth_manager._run_oauth_flow()
+
+        _, kwargs = mock_flow.run_local_server.call_args
+        assert kwargs.get("host") == "localhost"
+        assert kwargs.get("bind_addr") == "0.0.0.0"

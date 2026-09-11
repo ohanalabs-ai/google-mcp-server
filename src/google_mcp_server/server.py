@@ -53,11 +53,15 @@ class LegacyRuntime:
         redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8080")
         additional_scopes_str = os.getenv("GOOGLE_ADDITIONAL_SCOPES", "")
         additional_scopes = additional_scopes_str.split() if additional_scopes_str else None
+        open_browser = os.getenv("GOOGLE_MCP_OAUTH_OPEN_BROWSER", "false").strip().lower() == "true"
+        callback_bind_addr = os.getenv("GOOGLE_MCP_OAUTH_BIND_ADDR", "0.0.0.0")
         self.auth_manager = GoogleAuthManager(
             client_id=client_id,
             client_secret=client_secret,
             redirect_uri=redirect_uri,
             additional_scopes=additional_scopes,
+            open_browser=open_browser,
+            callback_bind_addr=callback_bind_addr,
         )
         self.client_id = client_id
         self.client_secret = client_secret
