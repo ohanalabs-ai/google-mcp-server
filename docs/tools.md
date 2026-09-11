@@ -7,13 +7,16 @@ Complete reference for all 50+ tools available in the Google MCP Server.
 - **google_auth_status**: Check current authentication status
 - **google_auth_revoke**: Revoke authentication and clear stored credentials
 
-## Google Drive Tools (17 tools)
+## Google Drive Tools (18 tools)
 
 ### Basic Operations
 - **drive_list_files**: List files in Google Drive
   - Parameters: `query`, `folder_id`, `max_results`, `drive_id`, `include_team_drives`
 - **drive_get_file**: Get file metadata and content
   - Parameters: `file_id`, `include_content`
+- **drive_get_google_doc_tabs**: Get the full text content of every tab in a Google Doc
+  - Parameters: `document_id`
+  - Use this instead of `drive_get_file` for Google Docs that use Google's "tabs" feature - Drive's export API is not guaranteed to return more than the default/first tab, with no error when content is missing. Requires `documents.readonly` (or `documents`) scope in addition to Drive scopes.
 - **drive_create_file**: Create a file in Google Drive
   - Parameters: `name`, `content`, `parent_folder_id`, `mime_type`, `drive_id`
 - **drive_upload_file**: Upload a file to Google Drive

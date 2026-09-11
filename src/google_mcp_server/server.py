@@ -25,6 +25,7 @@ from .broker import (
 )
 from .calendar_client import GoogleCalendarClient
 from .contacts_client import GoogleContactsClient
+from .docs_client import GoogleDocsClient
 from .drive_client import GoogleDriveClient
 from .gmail_client import GmailClient
 from .integration_client import GoogleIntegrationClient
@@ -65,6 +66,7 @@ class LegacyRuntime:
         self.additional_scopes = additional_scopes or []
         self._creds = None
         self._drive_client = None
+        self._docs_client = None
         self._gmail_client = None
         self._calendar_client = None
         self._integration_client = None
@@ -87,6 +89,11 @@ class LegacyRuntime:
         if self._drive_client is None:
             self._drive_client = GoogleDriveClient(self.get_credentials())
         return self._drive_client
+
+    def get_docs_client(self) -> GoogleDocsClient:
+        if self._docs_client is None:
+            self._docs_client = GoogleDocsClient(self.get_credentials())
+        return self._docs_client
 
     def get_gmail_client(self) -> GmailClient:
         if self._gmail_client is None:
@@ -137,6 +144,7 @@ class LegacyRuntime:
         if success:
             self._creds = None
             self._drive_client = None
+            self._docs_client = None
             self._gmail_client = None
             self._calendar_client = None
             self._integration_client = None
@@ -183,6 +191,10 @@ def get_credentials():
 
 def get_drive_client() -> GoogleDriveClient:
     return _get_runtime().get_drive_client()
+
+
+def get_docs_client() -> GoogleDocsClient:
+    return _get_runtime().get_docs_client()
 
 
 def get_gmail_client() -> GmailClient:
@@ -313,6 +325,24 @@ def drive_get_file(file_id: str, include_content: bool = False) -> str:
     try:
         client = get_drive_client()
         result = client.get_file(file_id=file_id, include_content=include_content)
+        return str(result)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+@broker_tool()
+def drive_get_google_doc_tabs(document_id: str) -> str:
+    """Get the full text content of every tab in a Google Doc.
+
+    Use this instead of drive_get_file for Google Docs that use Google's
+    "tabs" feature. Drive's files.export (what drive_get_file uses for
+    content) has no documented support for tabs and is not guaranteed to
+    return more than the default/first tab - the Docs API's
+    documents.get(includeTabsContent=True) is the only documented way to
+    read every tab's content and title.
+    """
+    try:
+        client = get_docs_client()
+        result = client.get_document_tabs(document_id=document_id)
         return str(result)
     except Exception as e:
         return f"Error: {str(e)}"
