@@ -45,6 +45,7 @@ BASE_IDENTITY_SCOPES = [
 ]
 ADVANCED_SCOPE_ALLOWLIST = [
     "https://www.googleapis.com/auth/contacts",
+    "https://www.googleapis.com/auth/documents.readonly",
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/spreadsheets",
@@ -436,6 +437,7 @@ class BrokerConnectionRuntime:
         self.record = record
         self._creds: Credentials | None = None
         self._drive_client = None
+        self._docs_client = None
         self._gmail_client = None
         self._calendar_client = None
         self._contacts_client = None
@@ -518,6 +520,13 @@ class BrokerConnectionRuntime:
 
             self._drive_client = GoogleDriveClient(self.get_credentials())
         return self._drive_client
+
+    def get_docs_client(self):
+        if self._docs_client is None:
+            from .docs_client import GoogleDocsClient
+
+            self._docs_client = GoogleDocsClient(self.get_credentials())
+        return self._docs_client
 
     def get_gmail_client(self):
         if self._gmail_client is None:
@@ -1106,6 +1115,14 @@ def authorize_tool_call(tool_name: str, arguments: dict[str, Any], runtime: Brok
             "https://www.googleapis.com/auth/drive.file",
         })
 
+    def docs_read() -> None:
+        runtime.ensure_permission("drive.read")
+        runtime.ensure_google_scope({
+            "https://www.googleapis.com/auth/documents",
+            "https://www.googleapis.com/auth/documents.readonly",
+            "https://www.googleapis.com/auth/drive",
+        })
+
     def gmail_read() -> None:
         runtime.ensure_permission("gmail.read")
         runtime.ensure_google_scope({
@@ -1145,6 +1162,7 @@ def authorize_tool_call(tool_name: str, arguments: dict[str, Any], runtime: Brok
         "drive_list_files",
         "drive_list_shared_drives",
     }
+    docs_read_tools = {"drive_get_google_doc_tabs"}
     drive_write_tools = {
         "drive_copy_file",
         "drive_create_file",
@@ -1203,6 +1221,9 @@ def authorize_tool_call(tool_name: str, arguments: dict[str, Any], runtime: Brok
         return
     if tool_name in drive_read_tools:
         drive_read()
+        return
+    if tool_name in docs_read_tools:
+        docs_read()
         return
     if tool_name in drive_write_tools:
         drive_write()
