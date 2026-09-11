@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 from urllib.parse import urlencode
 from uuid import uuid4
 
@@ -228,6 +228,8 @@ class BrokerSettings(BaseModel):
     http_port: int = 8080
     jwt_ttl_seconds: int = 300
     data_dir: Path = Field(default_factory=lambda: Path.home() / ".local" / "state" / "google-mcp-server" / "broker")
+    store_backend: Literal["file", "memory", "redis"] = "file"
+    redis_url: str = "redis://localhost:6379/0"
 
     @property
     def callback_url(self) -> str:
@@ -261,6 +263,11 @@ class BrokerSettings(BaseModel):
                 "GOOGLE_MCP_BROKER_STORAGE_KEY, and GOOGLE_MCP_BROKER_JWT_SIGNING_KEY"
             )
         public_base_url = os.getenv("GOOGLE_MCP_PUBLIC_BASE_URL", "http://127.0.0.1:8080")
+        store_backend = os.getenv("GOOGLE_MCP_BROKER_STORE_BACKEND", "file").strip().lower()
+        if store_backend not in ("file", "memory", "redis"):
+            raise BrokerConfigurationError(
+                f"GOOGLE_MCP_BROKER_STORE_BACKEND must be file, memory, or redis - got {store_backend!r}"
+            )
         return cls(
             bootstrap_secret=bootstrap_secret,
             storage_key=storage_key,
@@ -270,6 +277,8 @@ class BrokerSettings(BaseModel):
             http_port=int(os.getenv("GOOGLE_MCP_HTTP_PORT", "8080")),
             jwt_ttl_seconds=int(os.getenv("GOOGLE_MCP_BROKER_JWT_TTL_SECONDS", "300")),
             data_dir=Path(os.getenv("GOOGLE_MCP_BROKER_DATA_DIR", str(Path.home() / ".local" / "state" / "google-mcp-server" / "broker"))),
+            store_backend=store_backend,
+            redis_url=os.getenv("GOOGLE_MCP_BROKER_REDIS_URL", "redis://localhost:6379/0"),
         )
 
 
@@ -285,13 +294,25 @@ class AdminSession:
     oauth_requested_scopes: list[str] = field(default_factory=list)
 
 
-class EncryptedFileStore:
-    """Persist encrypted broker records on disk."""
+class CredentialStore(Protocol):
+    """Persists encrypted per-connection broker records.
 
-    def __init__(self, data_dir: Path, secret: str):
-        self._data_dir = data_dir
-        self._data_dir.mkdir(parents=True, exist_ok=True)
-        self._data_dir.chmod(0o700)
+    Implementations differ only in *where* the ciphertext blob lives - the
+    encryption (AES-256-GCM, keyed from GOOGLE_MCP_BROKER_STORAGE_KEY) is
+    identical across all of them via _EncryptedRecordCodec, so switching
+    GOOGLE_MCP_BROKER_STORE_BACKEND never changes what's protected, only
+    where it's persisted.
+    """
+
+    def save(self, record: StoredConnectionRecord) -> None: ...
+
+    def load(self, connection_id: str) -> StoredConnectionRecord | None: ...
+
+
+class _EncryptedRecordCodec:
+    """Shared AES-256-GCM encode/decode for StoredConnectionRecord blobs."""
+
+    def __init__(self, secret: str):
         self._key = self._derive_key(secret)
 
     @staticmethod
@@ -304,10 +325,7 @@ class EncryptedFileStore:
             pass
         return hashlib.sha256(secret.encode("utf-8")).digest()
 
-    def _path_for(self, connection_id: str) -> Path:
-        return self._data_dir / f"{connection_id}.json"
-
-    def save(self, record: StoredConnectionRecord) -> None:
+    def _encrypt_record(self, record: StoredConnectionRecord) -> str:
         payload = record.model_dump_json().encode("utf-8")
         nonce = secrets.token_bytes(12)
         ciphertext = AESGCM(self._key).encrypt(nonce, payload, None)
@@ -315,19 +333,97 @@ class EncryptedFileStore:
             "nonce": base64.urlsafe_b64encode(nonce).decode("ascii"),
             "ciphertext": base64.urlsafe_b64encode(ciphertext).decode("ascii"),
         }
+        return json.dumps(wrapper)
+
+    def _decrypt_record(self, blob: str) -> StoredConnectionRecord:
+        wrapper = json.loads(blob)
+        nonce = base64.urlsafe_b64decode(wrapper["nonce"])
+        ciphertext = base64.urlsafe_b64decode(wrapper["ciphertext"])
+        plaintext = AESGCM(self._key).decrypt(nonce, ciphertext, None)
+        return StoredConnectionRecord.model_validate_json(plaintext)
+
+
+class EncryptedFileStore(_EncryptedRecordCodec):
+    """Persist encrypted broker records on disk. Default backend - matches
+    pre-existing behavior exactly when GOOGLE_MCP_BROKER_STORE_BACKEND is unset."""
+
+    def __init__(self, data_dir: Path, secret: str):
+        super().__init__(secret)
+        self._data_dir = data_dir
+        self._data_dir.mkdir(parents=True, exist_ok=True)
+        self._data_dir.chmod(0o700)
+
+    def _path_for(self, connection_id: str) -> Path:
+        return self._data_dir / f"{connection_id}.json"
+
+    def save(self, record: StoredConnectionRecord) -> None:
         path = self._path_for(record.connection_id)
-        path.write_text(json.dumps(wrapper), encoding="utf-8")
+        path.write_text(self._encrypt_record(record), encoding="utf-8")
         path.chmod(0o600)
 
     def load(self, connection_id: str) -> StoredConnectionRecord | None:
         path = self._path_for(connection_id)
         if not path.exists():
             return None
-        wrapper = json.loads(path.read_text(encoding="utf-8"))
-        nonce = base64.urlsafe_b64decode(wrapper["nonce"])
-        ciphertext = base64.urlsafe_b64decode(wrapper["ciphertext"])
-        plaintext = AESGCM(self._key).decrypt(nonce, ciphertext, None)
-        return StoredConnectionRecord.model_validate_json(plaintext)
+        return self._decrypt_record(path.read_text(encoding="utf-8"))
+
+
+class InMemoryCredentialStore(_EncryptedRecordCodec):
+    """Process-local encrypted broker record store - lost on restart.
+
+    Useful for tests and throwaway local runs where persistence across
+    restarts isn't wanted at all.
+    """
+
+    def __init__(self, secret: str):
+        super().__init__(secret)
+        self._blobs: dict[str, str] = {}
+
+    def save(self, record: StoredConnectionRecord) -> None:
+        self._blobs[record.connection_id] = self._encrypt_record(record)
+
+    def load(self, connection_id: str) -> StoredConnectionRecord | None:
+        blob = self._blobs.get(connection_id)
+        if blob is None:
+            return None
+        return self._decrypt_record(blob)
+
+
+class RedisCredentialStore(_EncryptedRecordCodec):
+    """Persist encrypted broker records in Redis - shared across broker
+    replicas/restarts, unlike the file and memory backends."""
+
+    def __init__(self, secret: str, redis_url: str, key_prefix: str = "google-mcp-broker:"):
+        super().__init__(secret)
+        import redis  # lazy import: only required when this backend is selected
+
+        self._client = redis.Redis.from_url(redis_url, decode_responses=True)
+        self._key_prefix = key_prefix
+
+    def _redis_key(self, connection_id: str) -> str:
+        return f"{self._key_prefix}{connection_id}"
+
+    def save(self, record: StoredConnectionRecord) -> None:
+        self._client.set(self._redis_key(record.connection_id), self._encrypt_record(record))
+
+    def load(self, connection_id: str) -> StoredConnectionRecord | None:
+        blob = self._client.get(self._redis_key(connection_id))
+        if blob is None:
+            return None
+        return self._decrypt_record(blob)
+
+
+def build_credential_store(settings: "BrokerSettings") -> CredentialStore:
+    """Select the credential store backend named by settings.store_backend."""
+    if settings.store_backend == "file":
+        return EncryptedFileStore(settings.data_dir, settings.storage_key)
+    if settings.store_backend == "memory":
+        return InMemoryCredentialStore(settings.storage_key)
+    if settings.store_backend == "redis":
+        return RedisCredentialStore(settings.storage_key, settings.redis_url)
+    raise BrokerConfigurationError(
+        f"Unknown GOOGLE_MCP_BROKER_STORE_BACKEND: {settings.store_backend!r}"
+    )
 
 
 class GoogleGrantVerifier:
@@ -732,7 +828,7 @@ class BrokerController:
 
     def __init__(self, settings: BrokerSettings, grant_verifier: GoogleGrantVerifier | None = None):
         self.settings = settings
-        self.store = EncryptedFileStore(settings.data_dir, settings.storage_key)
+        self.store = build_credential_store(settings)
         self.grant_verifier = grant_verifier or GoogleGrantVerifier()
         self.sessions: dict[str, AdminSession] = {}
 
