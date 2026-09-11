@@ -1,0 +1,52 @@
+name: 🐳 docker-multiarch-cicd
+run-name: 🐳 Docker Multi-Arch CICD for google-mcp-server
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+  push:
+    branches:
+      - main
+      - develop
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  verify-docker-compose:
+    if: github.event_name != 'pull_request' || github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Validate Docker Compose file
+        env:
+          GOOGLE_MCP_BROKER_BOOTSTRAP_SECRET: workflow-validation-bootstrap-secret
+          GOOGLE_MCP_BROKER_STORAGE_KEY: workflow-validation-storage-key
+          GOOGLE_MCP_BROKER_JWT_SIGNING_KEY: workflow-validation-jwt-signing-key
+          GOOGLE_MCP_PUBLIC_BASE_URL: http://127.0.0.1:8080
+        run: docker compose -f docker-compose.yaml config >/dev/null
+
+  docker-multiarch-cicd:
+    if: github.event_name != 'pull_request' || github.event.action != 'closed'
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+      pull-requests: write
+    uses: ohanalabs-ai/github-platform/.github/workflows/docker-multiarch-cicd.yaml@f93e3a775592a62ee60dd1f618dfed2af99f2200
+    with:
+      registry: ghcr.io
+      platforms: linux/amd64,linux/arm64
+      docker-compose-file-name: docker-compose.yaml
+      docker-compose-target-service: google-mcp-server
+      dockerhub-registry: docker.io
+      dockerhub-namespace: ${{ github.repository_owner }}
+      push-attestations: "false"
